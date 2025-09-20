@@ -31,16 +31,28 @@ def timeout_handler(signum, frame):
     raise TimeoutException("Code execution timed out")
 
 
-class Qwen3Runner:
-    def __init__(self, model_path: str = "./qwen3-32b"):
+class GPTRunner:
+    def __init__(self, model_path: str = "gpt-oss-20b"):
+        # Convert relative path to absolute path to ensure it's recognized as a local path
+        if model_path.startswith("./"):
+            model_path = os.path.abspath(model_path)
+        elif not os.path.isabs(model_path):
+            # If it's just a directory name, make it an absolute path
+            model_path = os.path.abspath(model_path)
+            
         self.model_path = model_path
-        print(f"Loading Qwen3-32B from: {model_path}")
+        print(f"Loading GPT-OSS-20B from: {model_path}")
+        
+        # Check if the path exists
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(f"Model directory not found: {model_path}")
 
         print("Loading tokenizer...")
         self.tokenizer = AutoTokenizer.from_pretrained(
             model_path,
             trust_remote_code=True,
-            padding_side="left"
+            padding_side="left",
+            local_files_only=True  # Force local loading
         )
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
@@ -52,7 +64,8 @@ class Qwen3Runner:
             device_map="auto",
             trust_remote_code=True,
             low_cpu_mem_usage=True,
-            use_cache=True
+            use_cache=True,
+            local_files_only=True  # Force local loading
         )
         self.model.eval()
         print("Model loaded successfully!")
@@ -94,7 +107,7 @@ class Qwen3Runner:
 
 
 class AIMEEvaluator:
-    def __init__(self, model_runner: Qwen3Runner):
+    def __init__(self, model_runner: GPTRunner):
         self.model = model_runner
         # Define the different iteration counts to test
         self.iteration_counts = [1, 5, 10, 16]
@@ -420,7 +433,7 @@ Mathematical Reasoning:"""
                 if result["solved"]:
                     solved_count += 1
                     
-                # Save progress every 3 problems (since we're doing much more computation now)
+                # Save progress every 3 problems
                 if i % 3 == 0:
                     self.save_progress(results, dataset_name, i)
                     
@@ -450,7 +463,7 @@ Mathematical Reasoning:"""
 
     def save_progress(self, results: List[Dict], dataset_name: str, progress: int):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"qwen3_multi_iter_progress_{dataset_name.lower()}_{progress}_{timestamp}.json"
+        filename = f"gpt_multi_iter_progress_{dataset_name.lower()}_{progress}_{timestamp}.json"
         with open(filename, 'w') as f:
             json.dump(results, f, indent=2)
         print(f"Progress saved to {filename}")
@@ -519,14 +532,32 @@ Mathematical Reasoning:"""
 
 
 def main():
-    print("Starting Qwen3-32B Multi-Iteration AIME Evaluation")
+    print("Starting GPT-OSS-20B Multi-Iteration AIME Evaluation")
     print("This will test 1, 5, 10, and 16 iterations for each method on each problem")
     
-    try:
-        model = Qwen3Runner("./qwen3-32b")
-    except Exception as e:
-        print(f"Failed to load model: {e}")
-        traceback.print_exc()
+    # Try different possible locations for the model
+    model_paths = [
+        "gpt-oss-20b",           # Direct directory name
+        "./gpt-oss-20b",         # Relative path
+        "/workspace/gpt-oss-20b" # Absolute path
+    ]
+    
+    model = None
+    for path in model_paths:
+        if os.path.exists(path):
+            print(f"Found model directory at: {path}")
+            try:
+                model = GPTRunner(path)
+                break
+            except Exception as e:
+                print(f"Failed to load model from {path}: {e}")
+                continue
+    
+    if model is None:
+        print("Failed to load model from any of the expected locations.")
+        print("Please ensure the model is downloaded and located in one of these paths:")
+        for path in model_paths:
+            print(f"  - {path}")
         return
 
     evaluator = AIMEEvaluator(model)
@@ -547,11 +578,11 @@ def main():
     if all_results:
         summary = evaluator.generate_summary(all_results)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        final_filename = f"qwen3_multi_iteration_aime_results_{timestamp}.json"
+        final_filename = f"gpt_multi_iteration_aime_results_{timestamp}.json"
         
         final_output = {
             "model_info": {
-                "model_name": "Qwen3-32B", 
+                "model_name": "GPT-OSS-20B", 
                 "model_path": model.model_path,
                 "iteration_counts_tested": evaluator.iteration_counts
             },
