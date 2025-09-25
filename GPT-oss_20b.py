@@ -20,8 +20,10 @@ from vllm import LLM, SamplingParams
 # -------- Load dataset (AIME 2024 only) --------
 try:
     from aime_problems import AIME_2024_PROBLEMS  # list of {"question": str, "answer": str}
-except Exception:
+    print(f"✓ Loaded {len(AIME_2024_PROBLEMS)} real AIME 2024 problems")
+except Exception as e:
     # Fallback tiny sample if your local aime_problems.py isn't available.
+    print(f"⚠️  WARNING: Could not load real AIME problems ({e}), using fallback dummy problems")
     AIME_2024_PROBLEMS = [
         {"question": "Compute 1+2+...+10.", "answer": "55"},
         {"question": "If 2x+3=17, find x.", "answer": "7"},
@@ -29,11 +31,6 @@ except Exception:
     ]
 
 # ========================= Utilities =========================
-class TimeoutException(Exception):
-    pass
-
-def _timeout_handler(signum, frame):
-    raise TimeoutException("Code execution timed out")
 
 def _coerce_int(x) -> Optional[int]:
     try:
@@ -77,8 +74,7 @@ def execute_python_code_return_int(code_text: str, timeout: int = 12) -> int:
     if not code or len(code) < 4:
         return 0
 
-    signal.signal(signal.SIGALRM, _timeout_handler)
-    signal.alarm(timeout)
+    # Remove signal handling as it can cause issues in containerized environments
     out_buf = io.StringIO()
 
     try:
@@ -90,13 +86,14 @@ def execute_python_code_return_int(code_text: str, timeout: int = 12) -> int:
                 "abs": abs, "round": round, "pow": pow, "print": print,
                 "enumerate": enumerate, "zip": zip, "sorted": sorted,
                 "reversed": reversed, "all": all, "any": any,
+                "__import__": __import__,  # Add __import__ to allow import statements
             },
             "math": math,
+            "__name__": "__main__",  # Add __name__ to allow if __name__ == "__main__" checks
         }
         safe_locals = {}
         with redirect_stdout(out_buf):
             exec(code, safe_globals, safe_locals)
-        signal.alarm(0)
 
         def _extract_from_printed(printed: str) -> Optional[int]:
             if not printed:
@@ -121,11 +118,9 @@ def execute_python_code_return_int(code_text: str, timeout: int = 12) -> int:
         for fn_name in ("solve", "main"):
             fn = safe_locals.get(fn_name)
             if callable(fn):
-                signal.alarm(timeout)
                 out_buf2 = io.StringIO()
                 with redirect_stdout(out_buf2):
                     ret = fn()
-                signal.alarm(0)
                 printed2 = out_buf2.getvalue().strip()
                 ans2 = _extract_from_printed(printed2)
                 if ans2 is not None:
@@ -153,12 +148,8 @@ def execute_python_code_return_int(code_text: str, timeout: int = 12) -> int:
 
         return 0
 
-    except TimeoutException:
-        return 0
     except Exception:
         return 0
-    finally:
-        signal.alarm(0)
 
 def extract_final_answer(text: str) -> Optional[int]:
     patt = [
@@ -186,7 +177,7 @@ def extract_final_answer(text: str) -> Optional[int]:
 
 # ========================= Model Wrapper =========================
 class QwenRunner:
-    def __init__(self, model_path: str = "gpt-oss-20b"):
+    def __init__(self, model_path: str = "openai/gpt-oss-20b"):
         print(f"Loading model: {model_path}")
         self.llm = LLM(
             model=model_path,
@@ -228,30 +219,17 @@ Now solve it.
 """
 
 def code_only_prompt(problem: str) -> str:
-    return f"""Solve the following AIME-style problem **using Python code ONLY**.
-
-HARD REQUIREMENTS (must follow exactly):
-- Output exactly ONE Python code block; no extra text.
-- Use only Python built-ins and the `math` module (no other imports).
-- Put your logic in a `solve()` function. It MUST set an integer variable `answer`.
-- At the end of `solve()`, print: print("__ANS__=" + str(answer))
-- Include the guard so it runs: if __name__ == "__main__": solve()
-- `answer` MUST be an int (not float); if you compute a float, cast safely to int.
-- Do not print anything except the single line with "__ANS__=".
-
-Problem:
-{problem}
-
-Your response must be exactly one code block like this:
+    return f"""You are a Python code generator. Generate ONLY Python code. No explanations.
 
 ```python
-# You may add short comments.
 import math
 
 def solve():
-    # compute the final integer and store it in `answer`
-    answer = 0  # <-- replace with your computation
-    assert isinstance(answer, int)
+    # Problem: {problem}
+    
+    # TODO: Solve the problem above and set answer to the integer result
+    answer = 1  # Replace this with your solution
+    
     print("__ANS__=" + str(answer))
 
 if __name__ == "__main__":
@@ -267,6 +245,18 @@ def evaluate_problem(runner: QwenRunner, prob: Dict) -> Dict:
     cot_pred = extract_final_answer(cot_text)
 
     code_text = runner.generate_once(code_only_prompt(q))
+    
+    # Debug: Show what the model actually generated
+    print(f"\n=== DEBUG: Model response for CODE prompt ===")
+    print(code_text)
+    print("=== END DEBUG ===\n")
+    
+    # Quick diagnostic: check if we're getting valid code blocks
+    if "```python" not in code_text:
+        print(f"  WARNING: No python code block found in response for problem")
+    elif "__ANS__" not in code_text and "answer" not in code_text.lower():
+        print(f"  WARNING: No answer extraction mechanism found in code")
+    
     code_pred = execute_python_code_return_int(code_text)
 
     return {
@@ -281,7 +271,7 @@ def main():
     print("🔥 AIME 2024 — CoT + Code (ONE trial each)")
     print("=" * 60)
 
-    runner = QwenRunner("gpt-oss-20b")
+    runner = QwenRunner("openai/gpt-oss-20b")
     problems = AIME_2024_PROBLEMS
 
     cot_correct = 0
