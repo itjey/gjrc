@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# AIME 2024 evaluator — CoT + Code with N-paths and Top-5 selection
+# AIME 2024 evaluator CoT + Code with N-paths and Top-5 selection
 # - Uses gpt-oss-120b via vLLM
 # - Loads problems from aime_problems.py (AIME_2024_PROBLEMS)
 # - For each problem, runs:
