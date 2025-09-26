@@ -1,17 +1,22 @@
 #!/usr/bin/env python3
-# AIME 2024 evaluator — CoT + Code (ONE trial each), single-file, no token accounting
-# - Uses gpt-oss-20b via vLLM
+# AIME 2024 evaluator — CoT + Code with N-paths and Top-5 selection
+# - Uses gpt-oss-120b via vLLM
 # - Loads problems from aime_problems.py (AIME_2024_PROBLEMS)
 # - For each problem, runs:
-#     1) Chain-of-Thought (text reasoning) → extract **Final Answer: n**
-#     2) Code-only → executes a strict, self-checking code template and extracts a number
+#     1) Chain-of-Thought (text reasoning) with N-paths → majority voting selection
+#     2) Code-only with N-paths → majority voting selection  
 # - Prints per-problem correctness for both methods and final overall accuracies
+#
+# Usage:
+#   python GPT-oss_120b.py          # Use N-paths with Top-5 selection (default)
+#   python GPT-oss_120b.py --single # Use single-path evaluation (original behavior)
 
 import re
 import io
 import math
 import signal
 import traceback
+import sys
 from typing import Dict, Optional
 from contextlib import redirect_stdout
 
@@ -23,7 +28,7 @@ try:
     print(f"✓ Loaded {len(AIME_2024_PROBLEMS)} real AIME 2024 problems")
 except Exception as e:
     # Fallback tiny sample if your local aime_problems.py isn't available.
-    print(f"⚠️  WARNING: Could not load real AIME problems ({e}), using fallback dummy problems")
+    print(f"WARNING: Could not load real AIME problems ({e}), using fallback dummy problems")
     AIME_2024_PROBLEMS = [
         {"question": "Compute 1+2+...+10.", "answer": "55"},
         {"question": "If 2x+3=17, find x.", "answer": "7"},
@@ -175,6 +180,76 @@ def extract_final_answer(text: str) -> Optional[int]:
             return None
     return None
 
+def select_best_answer_from_paths(predictions: list[Optional[int]]) -> Optional[int]:
+    """Select the best answer from multiple paths using majority voting"""
+    # Filter out None values
+    valid_predictions = [p for p in predictions if p is not None]
+    
+    if not valid_predictions:
+        return None
+    
+    # Use majority voting - count frequency of each answer
+    from collections import Counter
+    counter = Counter(valid_predictions)
+    
+    print(f"    📊 Vote counts: {dict(counter)}")
+    
+    # Return the most common answer (in case of tie, returns first one)
+    most_common = counter.most_common(1)
+    if most_common:
+        winner = most_common[0]
+        print(f"    Winner: {winner[0]} (appeared {winner[1]} times)")
+        return winner[0]
+    else:
+        return valid_predictions[0]
+
+def evaluate_cot_paths(runner, question: str) -> Optional[int]:
+    """Evaluate CoT using N paths and select best answer"""
+    print(f"  Generating {10} CoT responses...")
+    responses = runner.generate_n_paths(cot_prompt(question), n=10)  # Generate more, select top 5
+    
+    print(f"  Generated {len(responses)} responses, extracting predictions...")
+    predictions = []
+    for i, resp in enumerate(responses):
+        pred = extract_final_answer(resp)
+        predictions.append(pred)
+        print(f"    Path {i+1}: {pred} (response length: {len(resp)} chars)")
+    
+    final_answer = select_best_answer_from_paths(predictions)
+    print(f"  CoT Final Answer via majority vote: {final_answer}")
+    print(f"    All predictions: {predictions}")
+    
+    return final_answer
+
+def evaluate_code_paths(runner, question: str) -> Optional[int]:
+    """Evaluate Code using N paths and select best answer"""
+    print(f"  Generating {10} Code responses...")
+    responses = runner.generate_n_paths(code_only_prompt(question), n=10)  # Generate more, select top 5
+    
+    print(f"  Generated {len(responses)} responses, executing code...")
+    predictions = []
+    for i, resp in enumerate(responses):
+        pred = execute_python_code_return_int(resp)
+        predictions.append(pred)
+        # Show if code block was found
+        has_code = "```python" in resp
+        print(f"    Path {i+1}: {pred} (code block: {'✓' if has_code else '✗'}, length: {len(resp)} chars)")
+    
+    # Filter out 0 values which are often fallback values from failed execution
+    valid_predictions = [p for p in predictions if p != 0]
+    if not valid_predictions:
+        valid_predictions = predictions  # Fall back to including zeros if that's all we have
+        print(f"  No non-zero predictions found, using all predictions including zeros")
+    else:
+        print(f"  Filtered out {len(predictions) - len(valid_predictions)} zero predictions")
+    
+    final_answer = select_best_answer_from_paths(valid_predictions)
+    print(f"  Code Final Answer via majority vote: {final_answer}")
+    print(f"  All predictions: {predictions}")
+    print(f"  Valid predictions: {valid_predictions}")
+    
+    return final_answer
+
 # ========================= Model Wrapper =========================
 class QwenRunner:
     def __init__(self, model_path: str = "openai/gpt-oss-120b"):
@@ -203,6 +278,45 @@ class QwenRunner:
         )
         out = self.llm.generate([prompt], params)[0]
         return (out.outputs[0].text or "").strip() if out.outputs else ""
+    
+    def generate_n_paths(self, prompt: str, n: int = 5) -> list[str]:
+        """Generate N diverse paths using higher temperature and return top 5 by length/quality"""
+        params = SamplingParams(
+            temperature=0.8,  # Higher temperature for diversity
+            top_p=0.9,
+            repetition_penalty=1.1,
+            n=n,
+            max_tokens=4000,
+        )
+        out = self.llm.generate([prompt], params)[0]
+        responses = [(output.text or "").strip() for output in out.outputs]
+        
+        # Filter out empty responses
+        responses = [r for r in responses if r]
+        print(f"    Generated {len(responses)} non-empty responses from {n} requested")
+        
+        # Sort by quality metrics (length as a proxy for completeness)
+        # You could add more sophisticated scoring here
+        scored_responses = []
+        for i, resp in enumerate(responses):
+            score = len(resp)  # Basic scoring by length
+            bonus_points = 0
+            # Add bonus for having key indicators of good responses
+            if "Final Answer:" in resp or "__ANS__" in resp or "answer" in resp.lower():
+                bonus_points += 1000
+            if "```python" in resp:
+                bonus_points += 500
+            
+            total_score = score + bonus_points
+            scored_responses.append((total_score, resp))
+            print(f"      Response {i+1}: score={total_score} (length={score}, bonus={bonus_points})")
+        
+        # Sort by score (descending) and take top 5
+        scored_responses.sort(key=lambda x: x[0], reverse=True)
+        top_responses = [resp for _, resp in scored_responses[:5]]
+        
+        print(f"    ⭐ Selected top {len(top_responses)} responses for evaluation")
+        return top_responses if top_responses else [""]  # Return at least one response
 
 # ========================= Prompts =========================
 def cot_prompt(problem: str) -> str:
@@ -243,6 +357,36 @@ def evaluate_problem(runner: QwenRunner, prob: Dict) -> Dict:
     q = prob["question"]
     true_ans = int(prob["answer"])
 
+    print(f"\n{'='*80}")
+    print(f"PROBLEM: {q[:100]}{'...' if len(q) > 100 else ''}")
+    print(f"TRUE ANSWER: {true_ans}")
+    print(f"{'='*80}")
+    
+    # Use N-paths approach for both CoT and Code
+    print("\nCHAIN-OF-THOUGHT EVALUATION:")
+    cot_pred = evaluate_cot_paths(runner, q)
+    
+    print("\nCODE EVALUATION:")
+    code_pred = evaluate_code_paths(runner, q)
+
+    print(f"\nRESULTS SUMMARY:")
+    print(f"  CoT Prediction: {cot_pred} {'✅' if cot_pred == true_ans else '❌'}")
+    print(f"  Code Prediction: {code_pred} {'✅' if code_pred == true_ans else '❌'}")
+    print(f"  True Answer: {true_ans}")
+
+    return {
+        "true": true_ans,
+        "cot_pred": cot_pred,
+        "code_pred": code_pred,
+        "cot_ok": (cot_pred == true_ans),
+        "code_ok": (code_pred == true_ans),
+    }
+
+def evaluate_problem_single_path(runner: QwenRunner, prob: Dict) -> Dict:
+    """Keep the original single-path evaluation for comparison"""
+    q = prob["question"]
+    true_ans = int(prob["answer"])
+
     cot_text = runner.generate_once(cot_prompt(q))
     cot_pred = extract_final_answer(cot_text)
 
@@ -272,8 +416,12 @@ def evaluate_problem(runner: QwenRunner, prob: Dict) -> Dict:
     }
 
 def main():
-    print("🔥 AIME 2024 — CoT + Code (ONE trial each)")
-    print("=" * 60)
+    # Check for command line argument to determine mode
+    use_single_path = "--single" in sys.argv
+    
+    mode_str = "Single-path" if use_single_path else "N-paths with Top-5 Selection"
+    print(f"🔥 AIME 2024 — CoT + Code ({mode_str})")
+    print("=" * 70)
 
     runner = QwenRunner("openai/gpt-oss-120b")
     problems = AIME_2024_PROBLEMS
@@ -282,8 +430,10 @@ def main():
     code_correct = 0
     total = len(problems)
 
+    evaluate_func = evaluate_problem_single_path if use_single_path else evaluate_problem
+
     for i, prob in enumerate(problems, 1):
-        res = evaluate_problem(runner, prob)
+        res = evaluate_func(runner, prob)
         cot_correct += int(res["cot_ok"])
         code_correct += int(res["code_ok"])
 
