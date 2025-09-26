@@ -177,7 +177,7 @@ def extract_final_answer(text: str) -> Optional[int]:
 
 # ========================= Model Wrapper =========================
 class QwenRunner:
-    def __init__(self, model_path: str = "openai/gpt-oss-20b"):
+    def __init__(self, model_path: str = "openai/gpt-oss-120b"):
         print(f"Loading model: {model_path}")
         self.llm = LLM(
             model=model_path,
@@ -199,7 +199,7 @@ class QwenRunner:
             top_p=1.0,
             repetition_penalty=1.0,
             n=1,
-            max_tokens=2048,
+            max_tokens=4000,
         )
         out = self.llm.generate([prompt], params)[0]
         return (out.outputs[0].text or "").strip() if out.outputs else ""
@@ -219,13 +219,9 @@ Now solve it.
 """
 
 def code_only_prompt(problem: str) -> str:
-<<<<<<< HEAD
-    return f"""You are a Python code generator. Generate ONLY Python code. No explanations.
-=======
     return f"""Do not use chain of thought. Use python code to solve the problem.
     Read the problem and then solve the problem within the code block. Output everything after the ```python tag. 
     Generate ONLY Python code. No explanations or comments.
->>>>>>> e403de7 (Added GPT-OSS changes)
 
 ```python
 import math
@@ -251,19 +247,12 @@ def evaluate_problem(runner: QwenRunner, prob: Dict) -> Dict:
     cot_pred = extract_final_answer(cot_text)
 
     code_text = runner.generate_once(code_only_prompt(q))
-<<<<<<< HEAD
-    
-    # Debug: Show what the model actually generated
-    print(f"\n=== DEBUG: Model response for CODE prompt ===")
-    print(code_text)
-=======
     print("code_text,", code_text)
     
     # Debug: Show what the model actually generated
     print(f"\n=== DEBUG: Model response for CODE prompt ===")
     print("q,", q)
     print("code text,", code_text)
->>>>>>> e403de7 (Added GPT-OSS changes)
     print("=== END DEBUG ===\n")
     
     # Quick diagnostic: check if we're getting valid code blocks
@@ -286,7 +275,7 @@ def main():
     print("🔥 AIME 2024 — CoT + Code (ONE trial each)")
     print("=" * 60)
 
-    runner = QwenRunner("openai/gpt-oss-20b")
+    runner = QwenRunner("openai/gpt-oss-120b")
     problems = AIME_2024_PROBLEMS
 
     cot_correct = 0
