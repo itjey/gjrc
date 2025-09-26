@@ -5,7 +5,7 @@
 # - Prints per-problem correctness for both methods and final accuracies
 #
 # Usage:
-#   python GPT-oss_120b.py --n 10         # number of samples per method (default 10)
+#   python GPT-oss_120b.py --n 5         # number of samples per method (default 5)
 
 import re
 import io
@@ -343,7 +343,7 @@ def evaluate_problem(runner: QwenRunner, prob: Dict, n_paths: int) -> Dict:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--n", type=int, default=10, help="number of samples per method for voting")
+    parser.add_argument("--n", type=int, default=5, help="number of samples per method for voting")
     parser.add_argument("--model", type=str, default="openai/gpt-oss-120b", help="vLLM model id/path")
     args = parser.parse_args()
 
